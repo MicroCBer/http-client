@@ -14,27 +14,23 @@
     forbid(unsafe_code)
 )]
 
-mod config;
-pub use config::Config;
-
-#[cfg_attr(feature = "docs", doc(cfg(feature = "curl_client")))]
+#[cfg_attr(feature = "docs", doc(cfg(curl_client)))]
 #[cfg(all(feature = "curl_client", not(target_arch = "wasm32")))]
 pub mod isahc;
 
-#[cfg_attr(feature = "docs", doc(cfg(feature = "wasm_client")))]
+#[cfg_attr(feature = "docs", doc(cfg(wasm_client)))]
 #[cfg(all(feature = "wasm_client", target_arch = "wasm32"))]
 pub mod wasm;
 
-#[cfg_attr(feature = "docs", doc(cfg(feature = "native_client")))]
+#[cfg_attr(feature = "docs", doc(cfg(native_client)))]
 #[cfg(any(feature = "curl_client", feature = "wasm_client"))]
 pub mod native;
 
-#[cfg_attr(feature = "docs", doc(cfg(feature = "h1_client")))]
-#[cfg_attr(feature = "docs", doc(cfg(feature = "default")))]
-#[cfg(any(feature = "h1_client", feature = "h1_client_rustls"))]
+#[cfg_attr(feature = "docs", doc(cfg(h1_client)))]
+#[cfg(feature = "h1_client")]
 pub mod h1;
 
-#[cfg_attr(feature = "docs", doc(cfg(feature = "hyper_client")))]
+#[cfg_attr(feature = "docs", doc(cfg(hyper_client)))]
 #[cfg(feature = "hyper_client")]
 pub mod hyper;
 
@@ -63,28 +59,6 @@ pub use http_types;
 pub trait HttpClient: std::fmt::Debug + Unpin + Send + Sync + 'static {
     /// Perform a request.
     async fn send(&self, req: Request) -> Result<Response, Error>;
-
-    /// Override the existing configuration with new configuration.
-    ///
-    /// Config options may not impact existing connections.
-    fn set_config(&mut self, _config: Config) -> http_types::Result<()> {
-        unimplemented!(
-            "{} has not implemented `HttpClient::set_config()`",
-            type_name_of(self)
-        )
-    }
-
-    /// Get the current configuration.
-    fn config(&self) -> &Config {
-        unimplemented!(
-            "{} has not implemented `HttpClient::config()`",
-            type_name_of(self)
-        )
-    }
-}
-
-fn type_name_of<T: ?Sized>(_val: &T) -> &'static str {
-    std::any::type_name::<T>()
 }
 
 /// The raw body of an http request or response.
@@ -95,15 +69,7 @@ pub type Error = http_types::Error;
 
 #[async_trait]
 impl HttpClient for Box<dyn HttpClient> {
-    async fn send(&self, req: Request) -> http_types::Result<Response> {
-        self.as_ref().send(req).await
-    }
-
-    fn set_config(&mut self, config: Config) -> http_types::Result<()> {
-        self.as_mut().set_config(config)
-    }
-
-    fn config(&self) -> &Config {
-        self.as_ref().config()
+    async fn send(&self, req: Request) -> Result<Response, Error> {
+        self.send(req).await
     }
 }

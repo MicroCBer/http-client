@@ -1,20 +1,16 @@
 //! http-client implementation for reqwest
 
-use std::convert::{Infallible, TryFrom};
-use std::fmt::Debug;
-use std::io;
-use std::str::FromStr;
-
+use super::{async_trait, Error, HttpClient, Request, Response};
 use futures_util::stream::TryStreamExt;
 use http_types::headers::{HeaderName, HeaderValue};
 use http_types::StatusCode;
 use hyper::body::HttpBody;
 use hyper::client::connect::Connect;
 use hyper_tls::HttpsConnector;
-
-use crate::Config;
-
-use super::{async_trait, Error, HttpClient, Request, Response};
+use std::convert::TryFrom;
+use std::fmt::Debug;
+use std::io;
+use std::str::FromStr;
 
 type HyperRequest = hyper::Request<hyper::Body>;
 
@@ -31,21 +27,14 @@ impl<C: Clone + Connect + Debug + Send + Sync + 'static> HyperClientObject for h
 
 /// Hyper-based HTTP Client.
 #[derive(Debug)]
-pub struct HyperClient {
-    client: Box<dyn HyperClientObject>,
-    config: Config,
-}
+pub struct HyperClient(Box<dyn HyperClientObject>);
 
 impl HyperClient {
     /// Create a new client instance.
     pub fn new() -> Self {
         let https = HttpsConnector::new();
         let client = hyper::Client::builder().build(https);
-
-        Self {
-            client: Box::new(client),
-            config: Config::default(),
-        }
+        Self(Box::new(client))
     }
 
     /// Create from externally initialized and configured client.
@@ -53,10 +42,7 @@ impl HyperClient {
     where
         C: Clone + Connect + Debug + Send + Sync + 'static,
     {
-        Self {
-            client: Box::new(client),
-            config: Config::default(),
-        }
+        Self(Box::new(client))
     }
 }
 
@@ -71,59 +57,10 @@ impl HttpClient for HyperClient {
     async fn send(&self, req: Request) -> Result<Response, Error> {
         let req = HyperHttpRequest::try_from(req).await?.into_inner();
 
-        let conn_fut = self.client.dyn_request(req);
-        let response = if let Some(timeout) = self.config.timeout {
-            match tokio::time::timeout(timeout, conn_fut).await {
-                Err(_elapsed) => Err(Error::from_str(400, "Client timed out")),
-                Ok(Ok(try_res)) => Ok(try_res),
-                Ok(Err(e)) => Err(e.into()),
-            }?
-        } else {
-            conn_fut.await?
-        };
+        let response = self.0.dyn_request(req).await?;
 
         let res = HttpTypesResponse::try_from(response).await?.into_inner();
         Ok(res)
-    }
-
-    /// Override the existing configuration with new configuration.
-    ///
-    /// Config options may not impact existing connections.
-    fn set_config(&mut self, config: Config) -> http_types::Result<()> {
-        let connector = HttpsConnector::new();
-        let mut builder = hyper::Client::builder();
-
-        if !config.http_keep_alive {
-            builder.pool_max_idle_per_host(1);
-        }
-
-        self.client = Box::new(builder.build(connector));
-        self.config = config;
-
-        Ok(())
-    }
-
-    /// Get the current configuration.
-    fn config(&self) -> &Config {
-        &self.config
-    }
-}
-
-impl TryFrom<Config> for HyperClient {
-    type Error = Infallible;
-
-    fn try_from(config: Config) -> Result<Self, Self::Error> {
-        let connector = HttpsConnector::new();
-        let mut builder = hyper::Client::builder();
-
-        if !config.http_keep_alive {
-            builder.pool_max_idle_per_host(1);
-        }
-
-        Ok(Self {
-            client: Box::new(builder.build(connector)),
-            config,
-        })
     }
 }
 
@@ -193,7 +130,7 @@ impl HttpTypesResponse {
             if let Some(name) = name {
                 let name = name.as_str();
                 let name = HeaderName::from_str(name)?;
-                res.append_header(name, value);
+                res.insert_header(name, value);
             }
         }
 

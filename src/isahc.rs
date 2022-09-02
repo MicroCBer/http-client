@@ -1,21 +1,13 @@
 //! http-client implementation for isahc
 
-use std::convert::TryFrom;
+use super::{async_trait, Body, Error, HttpClient, Request, Response};
 
 use async_std::io::BufReader;
-use isahc::config::Configurable;
-use isahc::{http, ResponseExt};
-
-use crate::Config;
-
-use super::{async_trait, Body, Error, HttpClient, Request, Response};
+use isahc::http;
 
 /// Curl-based HTTP Client.
 #[derive(Debug)]
-pub struct IsahcClient {
-    client: isahc::HttpClient,
-    config: Config,
-}
+pub struct IsahcClient(isahc::HttpClient);
 
 impl Default for IsahcClient {
     fn default() -> Self {
@@ -31,10 +23,7 @@ impl IsahcClient {
 
     /// Create from externally initialized and configured client.
     pub fn from_client(client: isahc::HttpClient) -> Self {
-        Self {
-            client,
-            config: Config::default(),
-        }
+        Self(client)
     }
 }
 
@@ -50,78 +39,23 @@ impl HttpClient for IsahcClient {
         }
 
         let body = req.take_body();
+
         let body = match body.len() {
             Some(len) => isahc::Body::from_reader_sized(body, len as u64),
             None => isahc::Body::from_reader(body),
         };
 
         let request = builder.body(body).unwrap();
-        let res = self.client.send_async(request).await.map_err(Error::from)?;
-        let maybe_metrics = res.metrics().cloned();
+        let res = self.0.send_async(request).await.map_err(Error::from)?;
         let (parts, body) = res.into_parts();
-        let body = Body::from_reader(BufReader::new(body), None);
+        let len = body.len().map(|len| len as usize);
+        let body = Body::from_reader(BufReader::new(body), len);
         let mut response = http_types::Response::new(parts.status.as_u16());
         for (name, value) in &parts.headers {
-            response.append_header(name.as_str(), value.to_str().unwrap());
+            response.insert_header(name.as_str(), value.to_str().unwrap());
         }
-
-        if let Some(metrics) = maybe_metrics {
-            response.ext_mut().insert(metrics);
-        }
-
         response.set_body(body);
         Ok(response)
-    }
-
-    /// Override the existing configuration with new configuration.
-    ///
-    /// Config options may not impact existing connections.
-    fn set_config(&mut self, config: Config) -> http_types::Result<()> {
-        let mut builder =
-            isahc::HttpClient::builder().max_connections_per_host(config.max_connections_per_host);
-
-        if !config.http_keep_alive {
-            builder = builder.connection_cache_size(0);
-        }
-        if config.tcp_no_delay {
-            builder = builder.tcp_nodelay();
-        }
-        if let Some(timeout) = config.timeout {
-            builder = builder.timeout(timeout);
-        }
-
-        self.client = builder.build()?;
-        self.config = config;
-
-        Ok(())
-    }
-
-    /// Get the current configuration.
-    fn config(&self) -> &Config {
-        &self.config
-    }
-}
-
-impl TryFrom<Config> for IsahcClient {
-    type Error = isahc::Error;
-
-    fn try_from(config: Config) -> Result<Self, Self::Error> {
-        let mut builder = isahc::HttpClient::builder();
-
-        if !config.http_keep_alive {
-            builder = builder.connection_cache_size(0);
-        }
-        if config.tcp_no_delay {
-            builder = builder.tcp_nodelay();
-        }
-        if let Some(timeout) = config.timeout {
-            builder = builder.timeout(timeout);
-        }
-
-        Ok(Self {
-            client: builder.build()?,
-            config,
-        })
     }
 }
 

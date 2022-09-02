@@ -1,33 +1,23 @@
 //! http-client implementation for fetch
 
-use std::convert::{Infallible, TryFrom};
-use std::pin::Pin;
+use super::{http_types::Headers, Body, Error, HttpClient, Request, Response};
 
 use futures::prelude::*;
-use send_wrapper::SendWrapper;
 
-use crate::Config;
-
-use super::{http_types::Headers, Body, Error, HttpClient, Request, Response};
+use std::convert::TryFrom;
+use std::pin::Pin;
+use std::task::{Context, Poll};
 
 /// WebAssembly HTTP Client.
 #[derive(Debug)]
 pub struct WasmClient {
-    config: Config,
+    _priv: (),
 }
 
 impl WasmClient {
     /// Create a new instance.
     pub fn new() -> Self {
-        Self {
-            config: Config::default(),
-        }
-    }
-}
-
-impl Default for WasmClient {
-    fn default() -> Self {
-        Self::new()
+        Self { _priv: () }
     }
 }
 
@@ -40,16 +30,9 @@ impl HttpClient for WasmClient {
         'a: 'async_trait,
         Self: 'async_trait,
     {
-        let config = self.config.clone();
-
-        wrap_send(async move {
+        InnerFuture::new(async move {
             let req: fetch::Request = fetch::Request::new(req).await?;
-            let conn = req.send();
-            let mut res = if let Some(timeout) = config.timeout {
-                async_std::future::timeout(timeout, conn).await??
-            } else {
-                conn.await?
-            };
+            let mut res = req.send().await?;
 
             let body = res.body_bytes();
             let mut response =
@@ -57,50 +40,44 @@ impl HttpClient for WasmClient {
             response.set_body(Body::from(body));
             for (name, value) in res.headers() {
                 let name: http_types::headers::HeaderName = name.parse().unwrap();
-                response.append_header(&name, value);
+                response.insert_header(&name, value);
             }
 
             Ok(response)
         })
     }
+}
 
-    /// Override the existing configuration with new configuration.
-    ///
-    /// Config options may not impact existing connections.
-    fn set_config(&mut self, config: Config) -> http_types::Result<()> {
-        self.config = config;
+struct InnerFuture {
+    fut: Pin<Box<dyn Future<Output = Result<Response, Error>> + 'static>>,
+}
 
-        Ok(())
-    }
-
-    /// Get the current configuration.
-    fn config(&self) -> &Config {
-        &self.config
+impl InnerFuture {
+    fn new<F: Future<Output = Result<Response, Error>> + 'static>(fut: F) -> Pin<Box<Self>> {
+        Box::pin(Self { fut: Box::pin(fut) })
     }
 }
 
-impl TryFrom<Config> for WasmClient {
-    type Error = Infallible;
+// This is safe because WASM doesn't have threads yet. Once WASM supports threads we should use a
+// thread to park the blocking implementation until it's been completed.
+unsafe impl Send for InnerFuture {}
 
-    fn try_from(config: Config) -> Result<Self, Self::Error> {
-        Ok(Self { config })
+impl Future for InnerFuture {
+    type Output = Result<Response, Error>;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        // This is safe because we're only using this future as a pass-through for the inner
+        // future, in order to implement `Send`. If it's safe to poll the inner future, it's safe
+        // to proxy it too.
+        unsafe { Pin::new_unchecked(&mut self.fut).poll(cx) }
     }
-}
-
-// This should not panic because WASM doesn't have threads yet. Once WASM supports threads
-// we can use a thread to park the blocking implementation until it's been completed.
-fn wrap_send<Fut, O>(f: Fut) -> Pin<Box<dyn Future<Output = O> + Send + Sync + 'static>>
-where
-    Fut: Future<Output = O> + 'static,
-{
-    Box::pin(SendWrapper::new(f))
 }
 
 mod fetch {
     use js_sys::{Array, ArrayBuffer, Reflect, Uint8Array};
-    use wasm_bindgen::{prelude::*, JsCast};
+    use wasm_bindgen::JsCast;
     use wasm_bindgen_futures::JsFuture;
-    use web_sys::{RequestInit, Window, WorkerGlobalScope};
+    use web_sys::{window, RequestInit};
 
     use std::iter::{IntoIterator, Iterator};
     use std::pin::Pin;
@@ -108,36 +85,6 @@ mod fetch {
     use http_types::StatusCode;
 
     use crate::Error;
-
-    enum WindowOrWorker {
-        Window(Window),
-        Worker(WorkerGlobalScope),
-    }
-
-    impl WindowOrWorker {
-        fn new() -> Self {
-            #[wasm_bindgen]
-            extern "C" {
-                type Global;
-
-                #[wasm_bindgen(method, getter, js_name = Window)]
-                fn window(this: &Global) -> JsValue;
-
-                #[wasm_bindgen(method, getter, js_name = WorkerGlobalScope)]
-                fn worker(this: &Global) -> JsValue;
-            }
-
-            let global: Global = js_sys::global().unchecked_into();
-
-            if !global.window().is_undefined() {
-                Self::Window(global.unchecked_into())
-            } else if !global.worker().is_undefined() {
-                Self::Worker(global.unchecked_into())
-            } else {
-                panic!("Only supported in a browser or web worker");
-            }
-        }
-    }
 
     /// Create a new fetch request.
 
@@ -205,11 +152,8 @@ mod fetch {
         // TODO(yoshuawuyts): turn this into a `Future` impl on `Request` instead.
         pub(crate) async fn send(self) -> Result<Response, Error> {
             // Send the request.
-            let scope = WindowOrWorker::new();
-            let promise = match scope {
-                WindowOrWorker::Window(window) => window.fetch_with_request(&self.request),
-                WindowOrWorker::Worker(worker) => worker.fetch_with_request(&self.request),
-            };
+            let window = window().expect("A global window object could not be found");
+            let promise = window.fetch_with_request(&self.request);
             let resp = JsFuture::from(promise)
                 .await
                 .map_err(|e| Error::from_str(StatusCode::BadRequest, format!("{:?}", e)))?;

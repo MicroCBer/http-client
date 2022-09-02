@@ -7,6 +7,9 @@ on:
       - staging
       - trying
 
+env:
+  RUSTFLAGS: -Dwarnings
+
 jobs:
   build_and_test:
     name: Build and test
@@ -14,28 +17,37 @@ jobs:
     strategy:
       matrix:
         os: [ubuntu-latest, windows-latest, macOS-latest]
-        backend: ["h1_client,native-tls", hyper_client, curl_client]
+        rust: [stable]
 
     steps:
     - uses: actions/checkout@master
 
+    - name: Install ${{ matrix.rust }}
+      uses: actions-rs/toolchain@v1
+      with:
+        toolchain: ${{ matrix.rust }}
+        override: true
+
     - name: check
-      run: cargo check --all-targets --workspace --no-default-features --features '${{ matrix.backend }}'
+      uses: actions-rs/cargo@v1
+      with:
+        command: check
+        args: --all --bins --examples
+
+    - name: check unstable
+      uses: actions-rs/cargo@v1
+      with:
+        command:  check
+        args: --all --benches --bins --examples --tests
 
     - name: tests
-      run: cargo test --all-targets --workspace --no-default-features --features '${{ matrix.backend }}'
+      uses: actions-rs/cargo@v1
+      with:
+        command: test
+        args: --all
 
-  check_no_features:
-    name: Checking without default features
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@master
-
-      - name: check
-        run: cargo check --no-default-features
-
-  clippy_fmt_docs:
-    name: Running clippy & fmt & docs
+  check_fmt_and_docs:
+    name: Checking fmt and docs
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@master
@@ -46,16 +58,13 @@ jobs:
         profile: minimal
         toolchain: nightly
         override: true
-        components: clippy, rustfmt
-
-    - name: clippy
-      run: cargo clippy --all-targets --workspace --features=docs
+        components: rustfmt
 
     - name: fmt
       run: cargo fmt --all -- --check
 
-    - name: docs
-      run: cargo doc --no-deps --features=docs
+    - name: Docs
+      run: cargo doc
 
   check_wasm:
     name: Check wasm targets
@@ -76,18 +85,3 @@ jobs:
       with:
         command: check
         args: --target wasm32-unknown-unknown --no-default-features --features "native_client,wasm_client"
-
-  check_features:
-    name: Check feature combinations
-    runs-on: ubuntu-latest
-    steps:
-    - uses: actions/checkout@master
-
-    - name: Install cargo-hack
-      run: cargo install cargo-hack
-
-    - name: Check all feature combinations works properly
-      # * `--feature-powerset` - run for the feature powerset of the package
-      # * `--no-dev-deps` - build without dev-dependencies to avoid https://github.com/rust-lang/cargo/issues/4866
-      # * `--skip docs` - skip `docs` feature
-      run: cargo hack check --feature-powerset --no-dev-deps --skip docs
